@@ -1,7 +1,6 @@
 import { decompressFrames, parseGIF } from "gifuct-js";
-import { GIFEncoder, applyPalette, quantize } from "gifenc";
 import { MAX_GIF_BYTES } from "./limits";
-import { exactBytes } from "./exact-bytes";
+import { encodeToBudget, even, type Encoded, type Scene, type Size, type Target } from "./budget-encode";
 
 type Fit = "cover" | "contain";
 
@@ -10,6 +9,7 @@ type SingleMsg = {
   buffer: ArrayBuffer;
   mime: string;
   maxBytes: number;
+  target: Target;
   overlay?: ImageBitmap;
   crop?: { x: number; y: number; w: number; h: number };
 };
@@ -27,6 +27,7 @@ type StartMsg = {
   gutterRatio: number;
   cells?: CellSpan[];
   maxBytes: number;
+  target: Target;
 };
 
 type Decoded = {
@@ -35,25 +36,12 @@ type Decoded = {
   total: number;
 };
 
-type Settings = {
-  longEdge: number;
-  fps: number;
-  colors: number;
-  durCap: number;
-  dither: number;
-  frameCap?: number;
-};
+/** Longest loop a collage will run, in ms. */
+const MAX_DURATION = 12_000;
+/** Decoded frames kept in memory across all sources, in bytes of RGBA. */
+const MEMORY_BUDGET = 640 * 1024 * 1024;
 
-type Encoded = {
-  bytes: Uint8Array;
-  width: number;
-  height: number;
-  frames: number;
-  fps: number;
-  colors: number;
-};
 
-const MAX_STORED_FRAMES = 48;
 
 const post = (data: unknown, transfer?: Transferable[]) => {
   const scope = self as unknown as {
@@ -73,9 +61,10 @@ addEventListener("message", (event) => {
 
 async function run(msg: StartMsg) {
   const cap = msg.maxBytes || MAX_GIF_BYTES;
+  const decoded: Array<Decoded | null> = [];
   try {
     post({ type: "progress", ratio: 0.02, label: "Reading GIFs" });
-    const decoded: Array<Decoded | null> = [];
+    const count = msg.buffers.filter(Boolean).length || 1;
     for (let i = 0; i < msg.buffers.length; i++) {
       const buffer = msg.buffers[i];
       const mime = msg.mimes[i] ?? "";
@@ -84,13 +73,13 @@ async function run(msg: StartMsg) {
         continue;
       }
       try {
-        decoded.push(await decodeAny(buffer, mime, sourceEdge(msg.buffers.length)));
+        decoded.push(await decodeAny(buffer, mime, 1600, MEMORY_BUDGET / count));
       } catch {
         throw new Error(`Couldn't read cell ${i + 1}. Use a GIF or a still image.`);
       }
       post({
         type: "progress",
-        ratio: 0.04 + (0.2 * (i + 1)) / msg.buffers.length,
+        ratio: 0.02 + (0.1 * (i + 1)) / msg.buffers.length,
         label: `Reading GIFs · ${i + 1} of ${msg.buffers.length}`,
       });
     }
@@ -98,34 +87,22 @@ async function run(msg: StartMsg) {
     const present = decoded.filter((g): g is Decoded => g !== null);
     if (present.length === 0) throw new Error("Add at least one GIF.");
 
-    const fps = sourceFps(present);
-    const colors = 256;
-    const dither = 1;
-    const durCap = 8000;
-    const edge = fitEdge(msg, 4096);
-
-    post({ type: "progress", ratio: 0.26, label: "Rendering full size" });
-    const encoded = await renderCollage(
-      decoded,
-      msg,
-      { longEdge: edge, fps, colors, durCap, dither },
-      (ratio, label) => {
-        post({ type: "progress", ratio: 0.28 + ratio * 0.7, label });
-      },
-    );
-
-    for (const gif of decoded) gif?.frames.forEach((frame) => frame.close());
-    deliver(encoded, cap);
+    const scene = collageScene(decoded, msg);
+    const encoded = await encodeToBudget(scene, msg.target, cap, (ratio, label) => {
+      post({ type: "progress", ratio: 0.12 + ratio * 0.88, label });
+    });
+    deliver(encoded);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Export failed.";
     post({ type: "error", message });
+  } finally {
+    for (const gif of decoded) gif?.frames.forEach((frame) => frame.close());
   }
 }
 
-function deliver(encoded: Encoded, cap: number) {
-  const raw = encoded.bytes.byteLength <= cap ? exactBytes(encoded.bytes, cap) : encoded.bytes;
-  const copy = new Uint8Array(raw.byteLength);
-  copy.set(raw);
+function deliver(encoded: Encoded) {
+  const copy = new Uint8Array(encoded.bytes.byteLength);
+  copy.set(encoded.bytes);
   const buffer = copy.buffer;
   post(
     {
@@ -136,42 +113,72 @@ function deliver(encoded: Encoded, cap: number) {
       frames: encoded.frames,
       fps: encoded.fps,
       colors: encoded.colors,
+      smoothing: encoded.smoothing,
+      scale: encoded.scale,
       bytes: copy.byteLength,
     },
     [buffer],
   );
 }
 
-function sourceFps(gifs: Decoded[]): number {
-  const delays = gifs.flatMap((gif) => gif.delays).filter((delay) => delay > 0);
-  if (delays.length === 0) return 12;
-  const average = delays.reduce((sum, delay) => sum + delay, 0) / delays.length;
-  return Math.max(10, Math.min(20, Math.round(1000 / average)));
-}
-
-const MAX_PIXELS = 6_500_000;
-
-function fitEdge(msg: StartMsg, edge: number): number {
-  let next = Math.max(320, Math.round(edge));
-  for (let i = 0; i < 8; i++) {
-    const size = canvasSize(msg.cols, msg.rows, msg.aspect, next, msg.gutterRatio);
-    const pixels = size.width * size.height;
-    if (pixels <= MAX_PIXELS && size.width <= 4096 && size.height <= 4096) return even(next);
-    const scale = Math.min(0.92, Math.sqrt(MAX_PIXELS / Math.max(1, pixels)));
-    next = Math.max(320, Math.floor(next * scale));
+/** Every moment at which any source changes frame, so no source frame is dropped or doubled. */
+function mergedTimeline(gifs: Decoded[]): { times: number[]; duration: number } {
+  const animated = gifs.filter((gif) => gif.frames.length > 1);
+  if (animated.length === 0) return { times: [0], duration: 100 };
+  const duration = Math.min(MAX_DURATION, Math.max(...animated.map((gif) => gif.total)));
+  const marks = new Set<number>([0]);
+  for (const gif of animated) {
+    let t = 0;
+    let i = 0;
+    while (t < duration) {
+      marks.add(Math.round(t / 10) * 10);
+      t += gif.delays[i % gif.delays.length] ?? 100;
+      i++;
+      if (i > 5000) break;
+    }
   }
-  return even(next);
+  const sorted = [...marks].filter((t) => t < duration).sort((a, b) => a - b);
+  const times: number[] = [];
+  for (const t of sorted) {
+    if (times.length === 0 || t - times[times.length - 1]! >= 20) times.push(t);
+  }
+  return { times, duration: Math.max(20, Math.round(duration / 10) * 10) };
 }
 
-function sourceEdge(count: number): number {
-  if (count <= 2) return 1920;
-  if (count <= 4) return 1600;
-  if (count <= 6) return 1280;
-  return 1080;
+function collageScene(slots: Array<Decoded | null>, msg: StartMsg): Scene {
+  const present = slots.filter((g): g is Decoded => g !== null);
+  const { times, duration } = mergedTimeline(present);
+  const sizeAt = (edge: number) => canvasSize(msg.cols, msg.rows, msg.aspect, edge, msg.gutterRatio);
+
+  // long edge at which the most detailed source is shown 1:1
+  const probe = sizeAt(1000);
+  let nativeEdge = 240;
+  slots.forEach((gif, i) => {
+    const first = gif?.frames[0];
+    if (!first) return;
+    const cell = cellFor(msg, i);
+    const w = cell.w * probe.cellW + Math.max(0, cell.w - 1) * probe.gutter;
+    const h = cell.h * probe.cellH + Math.max(0, cell.h - 1) * probe.gutter;
+    const k = msg.fit === "cover" ? Math.max(w / first.width, h / first.height) : Math.min(w / first.width, h / first.height);
+    nativeEdge = Math.max(nativeEdge, 1000 / k);
+  });
+
+  return {
+    nativeEdge,
+    times,
+    duration,
+    sizeAt,
+    keepColors: [msg.mat],
+    paint: (ctx, size, timeMs) => paintFrame(ctx, slots, msg, size as CollageSize, timeMs),
+  };
 }
 
-async function decodeAny(buffer: ArrayBuffer, mime: string, edge: number): Promise<Decoded> {
-  if (isGif(buffer, mime)) return decodeGif(buffer, edge);
+function cellFor(msg: StartMsg, i: number): CellSpan {
+  return msg.cells?.[i] ?? { c: i % msg.cols, r: Math.floor(i / msg.cols), w: 1, h: 1 };
+}
+
+async function decodeAny(buffer: ArrayBuffer, mime: string, edge: number, memory: number): Promise<Decoded> {
+  if (isGif(buffer, mime)) return decodeGif(buffer, edge, memory);
   return decodeStill(buffer, mime, edge);
 }
 
@@ -190,18 +197,18 @@ async function decodeStill(buffer: ArrayBuffer, mime: string, edge: number): Pro
   return { frames: [fitted], delays: [100], total: 100 };
 }
 
-async function decodeGif(buffer: ArrayBuffer, edge: number): Promise<Decoded> {
+async function decodeGif(buffer: ArrayBuffer, edge: number, memory: number): Promise<Decoded> {
   const parsed = parseGIF(buffer);
   const frames = decompressFrames(parsed, true);
   if (frames.length === 0) throw new Error("empty gif");
 
   const srcW = parsed.lsd.width;
   const srcH = parsed.lsd.height;
+  const MAX_STORED_FRAMES = 600;
   const keep = Math.min(frames.length, MAX_STORED_FRAMES);
-  const budget = 72 * 1024 * 1024;
-  const maxPixels = Math.floor(budget / (4 * Math.max(1, keep)));
+  const maxPixels = Math.floor(memory / (4 * Math.max(1, keep)));
   const aspect = Math.max(srcW, srcH) / Math.max(1, Math.min(srcW, srcH));
-  const memEdge = Math.max(480, Math.floor(Math.sqrt(maxPixels * aspect)));
+  const memEdge = Math.max(360, Math.floor(Math.sqrt(maxPixels * aspect)));
   const storeEdge = Math.min(edge, memEdge);
   const compScale = Math.min(1, storeEdge / Math.max(srcW, srcH));
   const cw = Math.max(1, Math.round(srcW * compScale));
@@ -296,12 +303,9 @@ async function fitBitmap(bmp: ImageBitmap, maxEdge: number): Promise<ImageBitmap
   return createImageBitmap(canvas);
 }
 
-function even(n: number): number {
-  const r = Math.max(2, Math.round(n));
-  return r % 2 === 0 ? r : r - 1;
-}
+type CollageSize = Size & { cellW: number; cellH: number; gutter: number };
 
-function canvasSize(cols: number, rows: number, aspect: number, longEdge: number, gutterRatio: number) {
+function canvasSize(cols: number, rows: number, aspect: number, longEdge: number, gutterRatio: number): CollageSize {
   const gw = (cols - 1) * gutterRatio;
   const gh = (rows - 1) * gutterRatio;
   const widthUnits = cols + gw;
@@ -312,11 +316,6 @@ function canvasSize(cols: number, rows: number, aspect: number, longEdge: number
   const width = cols * cellW + Math.max(0, cols - 1) * gutter;
   const height = rows * cellH + Math.max(0, rows - 1) * gutter;
   return { width, height, cellW, cellH, gutter };
-}
-
-function delayForFps(fps: number): number {
-  const ms = Math.round(1000 / fps);
-  return Math.max(20, Math.round(ms / 10) * 10);
 }
 
 function frameAt(gif: Decoded, timeMs: number): ImageBitmap {
@@ -356,178 +355,11 @@ function drawFit(
   ctx.restore();
 }
 
-function samplePixels(data: Uint8ClampedArray, maxPixels: number): Uint8ClampedArray {
-  const pixels = data.length >> 2;
-  const stride = Math.max(1, Math.ceil(pixels / maxPixels));
-  if (stride === 1) return data;
-  const count = Math.ceil(pixels / stride);
-  const out = new Uint8ClampedArray(count * 4);
-  let j = 0;
-  for (let i = 0; i < pixels; i += stride) {
-    const s = i * 4;
-    out[j++] = data[s]!;
-    out[j++] = data[s + 1]!;
-    out[j++] = data[s + 2]!;
-    out[j++] = data[s + 3]!;
-  }
-  return out.subarray(0, j);
-}
-
-async function renderCollage(
-  slots: Array<Decoded | null>,
-  msg: StartMsg,
-  settings: Settings,
-  onProgress: (ratio: number, label: string) => void,
-): Promise<Encoded> {
-  const size = canvasSize(msg.cols, msg.rows, msg.aspect, settings.longEdge, msg.gutterRatio);
-  const delay = delayForFps(settings.fps);
-  const fps = Math.round(1000 / delay);
-  const natural = Math.max(...slots.map((g) => g?.total ?? 0), delay);
-  const duration = Math.min(natural, settings.durCap);
-  const frameCount = Math.min(
-    settings.frameCap ?? 36,
-    Math.max(1, Math.min(36, Math.round(duration / delay))),
-  );
-
-  const canvas = new OffscreenCanvas(size.width, size.height);
-  const ctx = canvas.getContext("2d", { alpha: false, willReadFrequently: true });
-  if (!ctx) throw new Error("no canvas");
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = "high";
-
-  const label = `Filling 14.9 MB · ${size.width}×${size.height}`;
-  const colors = Math.max(128, Math.min(256, settings.colors));
-  const gif = GIFEncoder({ initialCapacity: Math.min(14_000_000, size.width * size.height) });
-
-  for (let i = 0; i < frameCount; i++) {
-    paintFrame(ctx, slots, msg, size, i * delay);
-    const data = ctx.getImageData(0, 0, size.width, size.height).data;
-    const palette = quantize(samplePixels(data, 120000), colors, { format: "rgb565" });
-    const index = await applyDither(data, size.width, size.height, palette, settings.dither);
-    gif.writeFrame(index, size.width, size.height, {
-      palette,
-      delay,
-      repeat: 0,
-    });
-    onProgress(0.3 + (0.66 * (i + 1)) / frameCount, label);
-    await new Promise((resolve) => setTimeout(resolve, 0));
-  }
-  gif.finish();
-  onProgress(0.99, "Checking size");
-
-  return {
-    bytes: gif.bytes(),
-    width: size.width,
-    height: size.height,
-    frames: frameCount,
-    fps,
-    colors,
-  };
-}
-
-function nearestColor(r: number, g: number, b: number, palette: number[][]): number {
-  let best = 0;
-  let mindist = 1e100;
-  for (let i = 0; i < palette.length; i++) {
-    const color = palette[i];
-    if (!color) continue;
-    const dr = (color[0] ?? 0) - r;
-    let dist = dr * dr;
-    if (dist > mindist) continue;
-    const dg = (color[1] ?? 0) - g;
-    dist += dg * dg;
-    if (dist > mindist) continue;
-    const db = (color[2] ?? 0) - b;
-    dist += db * db;
-    if (dist > mindist) continue;
-    mindist = dist;
-    best = i;
-  }
-  return best;
-}
-
-function rgb565Key(r: number, g: number, b: number): number {
-  return ((r << 8) & 0xf800) | ((g << 2) & 0x03e0) | (b >> 3);
-}
-
-async function applyDither(
-  rgba: Uint8ClampedArray,
-  width: number,
-  height: number,
-  palette: number[][],
-  strength: number,
-): Promise<Uint8Array> {
-  if (strength <= 0.02) return applyPalette(rgba, palette, "rgb565");
-
-  const index = new Uint8Array(width * height);
-  const work = new Float32Array(width * height * 3);
-  for (let i = 0, p = 0; i < rgba.length; i += 4, p += 3) {
-    work[p] = rgba[i] ?? 0;
-    work[p + 1] = rgba[i + 1] ?? 0;
-    work[p + 2] = rgba[i + 2] ?? 0;
-  }
-  const cache = new Int16Array(65536);
-  cache.fill(-1);
-
-  for (let y = 0; y < height; y++) {
-    const forward = y % 2 === 0;
-    const step = forward ? 1 : -1;
-    const start = forward ? 0 : width - 1;
-    const end = forward ? width : -1;
-    for (let x = start; x !== end; x += step) {
-      const at = y * width + x;
-      const p = at * 3;
-      const r = work[p] ?? 0;
-      const g = work[p + 1] ?? 0;
-      const b = work[p + 2] ?? 0;
-      const rr = r < 0 ? 0 : r > 255 ? 255 : r;
-      const gg = g < 0 ? 0 : g > 255 ? 255 : g;
-      const bb = b < 0 ? 0 : b > 255 ? 255 : b;
-      const key = rgb565Key(rr, gg, bb);
-      let chosen = cache[key] ?? -1;
-      if (chosen < 0) {
-        chosen = nearestColor(rr, gg, bb, palette);
-        cache[key] = chosen;
-      }
-      index[at] = chosen;
-      const color = palette[chosen];
-      if (!color) continue;
-      const er = (rr - (color[0] ?? 0)) * strength;
-      const eg = (gg - (color[1] ?? 0)) * strength;
-      const eb = (bb - (color[2] ?? 0)) * strength;
-      spread(work, width, height, x + step, y, er, eg, eb, 7 / 16);
-      spread(work, width, height, x - step, y + 1, er, eg, eb, 3 / 16);
-      spread(work, width, height, x, y + 1, er, eg, eb, 5 / 16);
-      spread(work, width, height, x + step, y + 1, er, eg, eb, 1 / 16);
-    }
-    if (y % 24 === 23) await new Promise((resolve) => setTimeout(resolve, 0));
-  }
-  return index;
-}
-
-function spread(
-  work: Float32Array,
-  width: number,
-  height: number,
-  x: number,
-  y: number,
-  er: number,
-  eg: number,
-  eb: number,
-  factor: number,
-) {
-  if (x < 0 || y < 0 || x >= width || y >= height) return;
-  const p = (y * width + x) * 3;
-  work[p] = (work[p] ?? 0) + er * factor;
-  work[p + 1] = (work[p + 1] ?? 0) + eg * factor;
-  work[p + 2] = (work[p + 2] ?? 0) + eb * factor;
-}
-
 function paintFrame(
   ctx: OffscreenCanvasRenderingContext2D,
   slots: Array<Decoded | null>,
   msg: StartMsg,
-  size: { width: number; height: number; cellW: number; cellH: number; gutter: number },
+  size: CollageSize,
   timeMs: number,
 ) {
   const [r, g, b] = msg.mat;
@@ -536,12 +368,7 @@ function paintFrame(
   for (let i = 0; i < slots.length; i++) {
     const gif = slots[i];
     if (!gif) continue;
-    const cell = msg.cells?.[i] ?? {
-      c: i % msg.cols,
-      r: Math.floor(i / msg.cols),
-      w: 1,
-      h: 1,
-    };
+    const cell = cellFor(msg, i);
     const x = cell.c * (size.cellW + size.gutter);
     const y = cell.r * (size.cellH + size.gutter);
     const w = cell.w * size.cellW + Math.max(0, cell.w - 1) * size.gutter;
@@ -554,26 +381,38 @@ type NormCrop = { x: number; y: number; w: number; h: number };
 
 async function runSingle(msg: SingleMsg) {
   const cap = msg.maxBytes || MAX_GIF_BYTES;
-  if (msg.op === "compress") {
-    await runCompress(msg, cap);
-    return;
-  }
   let decoded: Decoded | null = null;
   try {
-    post({ type: "progress", ratio: 0.04, label: "Reading GIF" });
-    decoded = await decodeAny(msg.buffer, msg.mime, 8192);
-    const crop = clampCrop(msg.crop);
-    const frame = decoded.frames[0];
-    if (!frame) throw new Error("empty gif");
-    const cropW = Math.max(2, frame.width * crop.w);
-    const cropH = Math.max(2, frame.height * crop.h);
-    const edge = msg.overlay ? Math.max(msg.overlay.width, msg.overlay.height) : Math.max(cropW, cropH);
+    // a GIF that already fits is handed back untouched: re-encoding could only lose quality
+    if (msg.op === "compress" && isGif(msg.buffer, msg.mime) && msg.buffer.byteLength <= cap) {
+      const size = gifHeaderSize(msg.buffer);
+      const copy = new Uint8Array(msg.buffer.byteLength);
+      copy.set(new Uint8Array(msg.buffer));
+      post(
+        {
+          type: "done",
+          buffer: copy.buffer,
+          width: size?.width ?? 0,
+          height: size?.height ?? 0,
+          frames: 0,
+          fps: 0,
+          colors: 256,
+          smoothing: 0,
+          scale: 1,
+          bytes: copy.byteLength,
+        },
+        [copy.buffer],
+      );
+      return;
+    }
 
-    post({ type: "progress", ratio: 0.2, label: "Rendering full size" });
-    const encoded = await encodeSingle(decoded, msg, crop, edge, 1, undefined, (ratio, label) => {
-      post({ type: "progress", ratio: 0.22 + ratio * 0.74, label });
+    post({ type: "progress", ratio: 0.03, label: "Reading GIF" });
+    decoded = await decodeAny(msg.buffer, msg.mime, 2560, MEMORY_BUDGET);
+    const scene = singleScene(decoded, msg);
+    const encoded = await encodeToBudget(scene, msg.target, cap, (ratio, label) => {
+      post({ type: "progress", ratio: 0.1 + ratio * 0.9, label });
     });
-    deliver(encoded, cap);
+    deliver(encoded);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Export failed.";
     post({ type: "error", message });
@@ -589,52 +428,6 @@ function gifHeaderSize(buffer: ArrayBuffer): { width: number; height: number } |
   return { width: view[6]! | (view[7]! << 8), height: view[8]! | (view[9]! << 8) };
 }
 
-async function runCompress(msg: SingleMsg, cap: number) {
-  if (isGif(msg.buffer, msg.mime)) {
-    const size = gifHeaderSize(msg.buffer);
-    const bytes = new Uint8Array(msg.buffer);
-    const raw = bytes.byteLength <= cap ? exactBytes(bytes, cap) : bytes;
-    const copy = new Uint8Array(raw.byteLength);
-    copy.set(raw);
-    const buffer = copy.buffer;
-    post(
-      {
-        type: "done",
-        buffer,
-        width: size?.width ?? 0,
-        height: size?.height ?? 0,
-        frames: 0,
-        fps: 0,
-        colors: 256,
-        bytes: copy.byteLength,
-      },
-      [buffer],
-    );
-    return;
-  }
-
-  let decoded: Decoded | null = null;
-  try {
-    post({ type: "progress", ratio: 0.04, label: "Reading GIF" });
-    decoded = await decodeAny(msg.buffer, msg.mime, 8192);
-    const crop = { x: 0, y: 0, w: 1, h: 1 };
-    const frame = decoded.frames[0];
-    if (!frame) throw new Error("empty gif");
-    const edge = Math.max(frame.width, frame.height);
-    post({ type: "progress", ratio: 0.16, label: "Rendering full size" });
-    const encoded = await encodeSingle(decoded, msg, crop, edge, 1, undefined, (ratio, label) => {
-      post({ type: "progress", ratio: 0.22 + ratio * 0.74, label });
-    });
-    deliver(encoded, cap);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Export failed.";
-    post({ type: "error", message });
-  } finally {
-    decoded?.frames.forEach((frame) => frame.close());
-    msg.overlay?.close();
-  }
-}
-
 function clampCrop(crop?: NormCrop): NormCrop {
   if (!crop) return { x: 0, y: 0, w: 1, h: 1 };
   const x = Math.min(1, Math.max(0, crop.x));
@@ -644,56 +437,44 @@ function clampCrop(crop?: NormCrop): NormCrop {
   return { x, y, w, h };
 }
 
-async function encodeSingle(
-  decoded: Decoded,
-  msg: SingleMsg,
-  crop: NormCrop,
-  longEdge: number,
-  dither: number,
-  frameCap: number | undefined,
-  onProgress: (ratio: number, label: string) => void,
-): Promise<Encoded> {
-  const frame = decoded.frames[0];
-  if (!frame) throw new Error("empty gif");
-  const sx = Math.max(0, Math.round(crop.x * frame.width));
-  const sy = Math.max(0, Math.round(crop.y * frame.height));
-  const sw = Math.max(1, Math.min(frame.width - sx, Math.round(crop.w * frame.width)));
-  const sh = Math.max(1, Math.min(frame.height - sy, Math.round(crop.h * frame.height)));
-  const scale = longEdge / Math.max(sw, sh);
-  const width = even(Math.max(2, sw * scale));
-  const height = even(Math.max(2, sh * scale));
-  const canvas = new OffscreenCanvas(width, height);
-  const ctx = canvas.getContext("2d", { alpha: false, willReadFrequently: true });
-  if (!ctx) throw new Error("no canvas");
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = "high";
+function singleScene(decoded: Decoded, msg: SingleMsg): Scene {
+  const first = decoded.frames[0];
+  if (!first) throw new Error("empty gif");
+  const crop = clampCrop(msg.crop);
+  const sx = Math.max(0, Math.round(crop.x * first.width));
+  const sy = Math.max(0, Math.round(crop.y * first.height));
+  const sw = Math.max(1, Math.min(first.width - sx, Math.round(crop.w * first.width)));
+  const sh = Math.max(1, Math.min(first.height - sy, Math.round(crop.h * first.height)));
+  const nativeEdge = Math.max(sw, sh);
 
-  const gif = GIFEncoder({ initialCapacity: Math.min(14_000_000, width * height) });
-  let delaySum = 0;
-  const frames = frameCap ? decoded.frames.slice(0, frameCap) : decoded.frames;
-  const count = frames.length;
-  for (let i = 0; i < count; i++) {
-    const bitmap = frames[i];
-    if (!bitmap) continue;
-    ctx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, width, height);
-    if (msg.overlay) ctx.drawImage(msg.overlay, 0, 0, width, height);
-    const data = ctx.getImageData(0, 0, width, height).data;
-    const palette = quantize(samplePixels(data, 120000), 256, { format: "rgb565" });
-    const index = await applyDither(data, width, height, palette, dither);
-    const delay = Math.max(20, Math.round((decoded.delays[i] ?? 100) / 10) * 10);
-    delaySum += delay;
-    gif.writeFrame(index, width, height, { palette, delay, repeat: 0 });
-    onProgress((i + 1) / count, msg.op === "compress" ? `Stopping at 14.9 MB · ${width}×${height}` : `Filling 14.9 MB · ${width}×${height}`);
-    await new Promise((resolve) => setTimeout(resolve, 0));
+  const times: number[] = [];
+  let t = 0;
+  for (let i = 0; i < decoded.frames.length; i++) {
+    times.push(t);
+    t += Math.max(20, Math.round((decoded.delays[i] ?? 100) / 10) * 10);
   }
-  gif.finish();
-  const avg = delaySum / Math.max(1, count);
+  const starts = times.slice();
+
   return {
-    bytes: gif.bytes(),
-    width,
-    height,
-    frames: count,
-    fps: Math.max(1, Math.round(1000 / avg)),
-    colors: 256,
+    nativeEdge,
+    times,
+    duration: Math.max(20, t),
+    // "compress" promises the same picture size, so the size is fixed when it fits the target
+    lockEdge:
+      msg.op === "compress" && sw <= msg.target.maxW && sh <= msg.target.maxH ? nativeEdge : undefined,
+    sizeAt: (edge) => {
+      const scale = edge / nativeEdge;
+      return { width: even(Math.max(2, sw * scale)), height: even(Math.max(2, sh * scale)) };
+    },
+    paint: (ctx, size, timeMs) => {
+      let at = 0;
+      for (let i = 0; i < starts.length; i++) {
+        if (starts[i]! <= timeMs) at = i;
+        else break;
+      }
+      const bitmap = decoded.frames[at] ?? first;
+      ctx.drawImage(bitmap, sx, sy, sw, sh, 0, 0, size.width, size.height);
+      if (msg.overlay) ctx.drawImage(msg.overlay, 0, 0, size.width, size.height);
+    },
   };
 }

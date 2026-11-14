@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { clsx } from "clsx";
-import { Download, Loader2, Plus, X } from "lucide-react";
+import { Plus, X } from "lucide-react";
 import { exportCollage } from "@/lib/gif/export-client";
 import { layoutById, layoutsFor, type Count, type Layout } from "@/lib/gif/layouts";
-import { MAX_GIF_BYTES, formatMb } from "@/lib/gif/limits";
+import { MAX_GIF_BYTES, TARGETS, formatMb, type TargetId } from "@/lib/gif/limits";
+import { ExportBar, ResultCard, type ToolResult } from "./tool-bits";
 
 type Fit = "cover" | "contain";
 type Mat = "black" | "paper";
@@ -17,15 +18,7 @@ type Slot = {
   bytes: number;
 };
 
-type Result = {
-  url: string;
-  bytes: number;
-  width: number;
-  height: number;
-  frames: number;
-  fps: number;
-  colors: number;
-};
+type Result = ToolResult;
 
 const COUNTS: Count[] = [2, 4, 6, 8];
 
@@ -37,13 +30,13 @@ const ASPECTS: Record<AspectKey, { label: string; value: number }> = {
 
 const MATS: Record<Mat, { label: string; rgb: [number, number, number]; className: string }> = {
   black: { label: "Black", rgb: [0, 0, 0], className: "bg-mat-black" },
-  paper: { label: "Paper", rgb: [232, 238, 248], className: "bg-mat-paper" },
+  paper: { label: "White", rgb: [255, 255, 255], className: "bg-mat-paper" },
 };
 
 const GAPS: Record<Gap, { label: string; ratio: number; className: string }> = {
   off: { label: "None", ratio: 0, className: "gap-0" },
-  line: { label: "Hairline", ratio: 0.015, className: "gap-1" },
-  open: { label: "Open", ratio: 0.04, className: "gap-2" },
+  line: { label: "Thin", ratio: 0.015, className: "gap-1" },
+  open: { label: "Wide", ratio: 0.04, className: "gap-2" },
 };
 
 const ACCEPT = "image/gif,image/png,image/jpeg,image/webp,image/avif,.gif";
@@ -67,7 +60,8 @@ export function CollageTool() {
   const [count, setCount] = useState<Count>(4);
   const [layoutId, setLayoutId] = useState("grid");
   const [aspectKey, setAspectKey] = useState<AspectKey>("four");
-  const [fit, setFit] = useState<Fit>("contain");
+  const [fit, setFit] = useState<Fit>("cover");
+  const [target, setTarget] = useState<TargetId>("x");
   const [mat, setMat] = useState<Mat>("black");
   const [gap, setGap] = useState<Gap>("line");
   const [slots, setSlots] = useState<Array<Slot | null>>([null, null, null, null]);
@@ -215,6 +209,7 @@ export function CollageTool() {
     try {
       const files = slots.map((slot) => slot?.file).filter((file): file is File => !!file);
       const exported = await exportCollage({
+        target,
         files,
         cols,
         rows,
@@ -229,10 +224,10 @@ export function CollageTool() {
       });
       if (jobRef.current !== job) return;
       if (exported.bytes > MAX_GIF_BYTES) {
-        throw new Error("Export came out over 14.9 MB.");
+        throw new Error("Export came out over the size limit.");
       }
       const blob = new Blob([exported.buffer], { type: "image/gif" });
-      if (blob.size > MAX_GIF_BYTES) throw new Error("Export came out over 14.9 MB.");
+      if (blob.size > MAX_GIF_BYTES) throw new Error("Export came out over the size limit.");
       rememberResult({
         url: URL.createObjectURL(blob),
         bytes: blob.size,
@@ -241,6 +236,9 @@ export function CollageTool() {
         frames: exported.frames,
         fps: exported.fps,
         colors: exported.colors,
+        smoothing: exported.smoothing,
+        scale: exported.scale,
+        target,
       });
     } catch (cause) {
       if (jobRef.current !== job) return;
@@ -254,39 +252,122 @@ export function CollageTool() {
     }
   }
 
+  const settings = (
+    <div className="flex flex-col gap-6">
+      <Panel title="Layout" aside={`${count} GIFs`}>
+        <div className="grid grid-cols-4 gap-2">
+          {COUNTS.map((n) => (
+            <Pick key={n} active={count === n} onClick={() => resizeTo(n)} label={`${n} cells`}>
+              {n}
+            </Pick>
+          ))}
+        </div>
+        <div className="grid grid-cols-4 gap-2">
+          {layoutsFor(count).map((item) => {
+            const active = item.id === layout.id;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                aria-pressed={active}
+                onClick={() => {
+                  setLayoutId(item.id);
+                  rememberResult(null);
+                }}
+                className={clsx(
+                  "flex flex-col items-center gap-2 rounded-md border px-2 py-3 text-xs font-medium transition-colors",
+                  active ? "border-accent bg-accent/10 text-ink" : "border-line text-muted hover:border-line-strong hover:text-ink",
+                )}
+              >
+                <Glyph layout={item} active={active} />
+                {item.label}
+              </button>
+            );
+          })}
+        </div>
+      </Panel>
+
+      <Panel title="Cells">
+        <Row label="Shape">
+          <Segment
+            value={aspectKey}
+            onChange={(value) => {
+              setAspectKey(value as AspectKey);
+              rememberResult(null);
+            }}
+            options={(Object.keys(ASPECTS) as AspectKey[]).map((key) => ({ value: key, label: ASPECTS[key].label }))}
+          />
+        </Row>
+        <Row label="Fit">
+          <Segment
+            value={fit}
+            onChange={(value) => {
+              setFit(value as Fit);
+              rememberResult(null);
+            }}
+            options={[
+              { value: "cover", label: "Fill" },
+              { value: "contain", label: "Whole GIF" },
+            ]}
+          />
+        </Row>
+        <Row label="Gap">
+          <Segment
+            value={gap}
+            onChange={(value) => {
+              setGap(value as Gap);
+              rememberResult(null);
+            }}
+            options={(Object.keys(GAPS) as Gap[]).map((key) => ({ value: key, label: GAPS[key].label }))}
+          />
+        </Row>
+        <Row label="Backing">
+          <Segment
+            value={mat}
+            onChange={(value) => {
+              setMat(value as Mat);
+              rememberResult(null);
+            }}
+            options={[
+              { value: "black", label: "Black" },
+              { value: "paper", label: "White" },
+            ]}
+          />
+        </Row>
+      </Panel>
+
+      <Panel title="Export for">
+        <Segment
+          value={target}
+          onChange={(value) => {
+            setTarget(value as TargetId);
+            rememberResult(null);
+          }}
+          options={(Object.keys(TARGETS) as TargetId[]).map((key) => ({ value: key, label: TARGETS[key].label }))}
+        />
+        <p className="text-xs leading-5 text-muted">{TARGETS[target].hint}</p>
+      </Panel>
+    </div>
+  );
+
   return (
     <>
-      <div className="flex flex-col gap-4 pb-40">
-        <section className="rounded-lg border border-line bg-surface p-3 sm:p-4" aria-label="Collage settings">
-          <div className="flex flex-col gap-3">
-            <div className="flex flex-wrap items-end justify-between gap-3">
-              <Group label="Cells">
-                {COUNTS.map((n) => {
-                  const shape = layoutsFor(n)[0]!;
-                  const active = count === n;
-                  return (
-                    <button
-                      key={n}
-                      type="button"
-                      aria-pressed={active}
-                      onClick={() => resizeTo(n)}
-                      className={clsx(
-                        "inline-flex h-11 items-center justify-center gap-2 rounded-lg border px-3 text-sm font-medium transition-colors",
-                        active
-                          ? "border-amber bg-amber text-amber-ink"
-                          : "border-line bg-canvas text-ink hover:bg-surface-2",
-                      )}
-                    >
-                      <Glyph layout={shape} active={active} />
-                      {n}
-                    </button>
-                  );
-                })}
-              </Group>
+      <div className="grid gap-6 pb-32 lg:grid-cols-[minmax(0,1fr)_20rem] lg:items-start lg:gap-8">
+        <div className="flex min-w-0 flex-col gap-6">
+          <section aria-label="Collage board">
+            <div className="mb-3 flex items-center justify-between gap-4">
+              <p className="text-sm text-muted">
+                {selected !== null
+                  ? "Pick another cell to swap places."
+                  : filled === 0
+                    ? "Drop GIFs onto the board, or add them one cell at a time."
+                    : `${filled} of ${count} cells filled. Drag a cell to reorder.`}
+              </p>
               <label
                 htmlFor={bulkId}
-                className="inline-flex h-11 cursor-pointer items-center rounded-lg border border-line bg-canvas px-3 text-sm font-medium text-ink hover:bg-surface-2"
+                className="inline-flex h-10 shrink-0 cursor-pointer items-center gap-2 rounded-md border border-line-strong px-4 text-sm font-medium text-ink transition-colors hover:bg-surface-2"
               >
+                <Plus className="size-4" aria-hidden />
                 Add GIFs
                 <input
                   id={bulkId}
@@ -302,245 +383,136 @@ export function CollageTool() {
                 />
               </label>
             </div>
-            <div className="grid grid-cols-2 gap-3 lg:grid-cols-3">
-              <Group label="Design" className="col-span-2 lg:col-span-3">
-                <div className="flex flex-wrap gap-1.5">
-                  {layoutsFor(count).map((item) => {
-                    const active = item.id === layout.id;
-                    return (
-                      <button
-                        key={item.id}
-                        type="button"
-                        aria-pressed={active}
-                        onClick={() => {
-                          setLayoutId(item.id);
-                          rememberResult(null);
-                        }}
-                        className={clsx(
-                          "inline-flex h-11 items-center gap-2 rounded-lg border px-3 text-sm font-medium",
-                          active
-                            ? "border-amber bg-amber text-amber-ink"
-                            : "border-line bg-canvas text-ink hover:bg-surface-2",
-                        )}
-                      >
-                        <Glyph layout={item} active={active} />
-                        {item.label}
-                      </button>
-                    );
-                  })}
+            <div className="rounded-lg border border-line bg-surface p-4 sm:p-6">
+              <div className="board-fit mx-auto" style={{ "--board-aspect": String(boardAspect) } as CSSProperties}>
+                <div
+                  className={clsx("board-grid grid", GAPS[gap].className, MATS[mat].className)}
+                  style={{
+                    gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
+                    gridTemplateRows: `repeat(${rows}, minmax(0, 1fr))`,
+                  }}
+                  onDragOver={(event) => event.preventDefault()}
+                  onDrop={(event) => {
+                    if (dragFrom.current !== null) return;
+                    const files = Array.from(event.dataTransfer.files ?? []);
+                    if (files.length) fillFiles(files);
+                  }}
+                >
+                  {slots.map((slot, index) => (
+                    <Cell
+                      key={index}
+                      index={index}
+                      span={layout.cells[index]}
+                      slot={slot}
+                      matClass={MATS[mat].className}
+                      fit={fit}
+                      selected={selected === index}
+                      onActivate={() => onCellActivate(index)}
+                      onFile={(file) => putSlot(index, file)}
+                      onClear={() => clearSlot(index)}
+                      onDragStart={() => {
+                        dragFrom.current = index;
+                      }}
+                      onDragEnd={() => {
+                        dragFrom.current = null;
+                      }}
+                      onDropSlot={() => {
+                        const from = dragFrom.current;
+                        dragFrom.current = null;
+                        if (from !== null) swap(from, index);
+                      }}
+                    />
+                  ))}
                 </div>
-              </Group>
-              <Group label="Shape" className="col-span-2 lg:col-span-1">
-                <Segment
-                  value={aspectKey}
-                  onChange={(value) => {
-                    setAspectKey(value as AspectKey);
-                    rememberResult(null);
-                  }}
-                  options={(Object.keys(ASPECTS) as AspectKey[]).map((key) => ({
-                    value: key,
-                    label: ASPECTS[key].label,
-                  }))}
-                />
-              </Group>
-              <Group label="Fit">
-                <Segment
-                  value={fit}
-                  onChange={(value) => {
-                    setFit(value as Fit);
-                    rememberResult(null);
-                  }}
-                  options={[
-                    { value: "contain", label: "Contain" },
-                    { value: "cover", label: "Cover" },
-                  ]}
-                />
-              </Group>
-              <Group label="Mat">
-                <Segment
-                  value={mat}
-                  onChange={(value) => {
-                    setMat(value as Mat);
-                    rememberResult(null);
-                  }}
-                  options={[
-                    { value: "black", label: "Black" },
-                    { value: "paper", label: "Paper" },
-                  ]}
-                />
-              </Group>
-              <Group label="Gap" className="col-span-2 lg:col-span-1">
-                <Segment
-                  value={gap}
-                  onChange={(value) => {
-                    setGap(value as Gap);
-                    rememberResult(null);
-                  }}
-                  options={(Object.keys(GAPS) as Gap[]).map((key) => ({
-                    value: key,
-                    label: GAPS[key].label,
-                  }))}
-                />
-              </Group>
-            </div>
-          </div>
-        </section>
-
-        <section aria-label="Collage board">
-          <div className="mb-2 flex items-baseline justify-between gap-3">
-            <h2 className="font-display text-xl font-semibold">Board</h2>
-            <p className="text-sm text-muted">
-              {selected !== null ? "Tap another cell to swap." : `${filled} of ${count} filled`}
-            </p>
-          </div>
-          <div className="board-fit mx-auto" style={{ "--board-aspect": String(boardAspect) } as CSSProperties}>
-            <div
-              className={clsx("board-grid grid rounded-lg p-1", GAPS[gap].className, MATS[mat].className)}
-              style={{
-                gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
-                gridTemplateRows: `repeat(${rows}, minmax(0, 1fr))`,
-              }}
-              onDragOver={(event) => event.preventDefault()}
-              onDrop={(event) => {
-                if (dragFrom.current !== null) return;
-                const files = Array.from(event.dataTransfer.files ?? []);
-                if (files.length) fillFiles(files);
-              }}
-            >
-              {slots.map((slot, index) => (
-                <Cell
-                  key={index}
-                  index={index}
-                  span={layout.cells[index]}
-                  slot={slot}
-                  matClass={MATS[mat].className}
-                  fit={fit}
-                  selected={selected === index}
-                  onActivate={() => onCellActivate(index)}
-                  onFile={(file) => putSlot(index, file)}
-                  onClear={() => clearSlot(index)}
-                  onDragStart={() => {
-                    dragFrom.current = index;
-                  }}
-                  onDragEnd={() => {
-                    dragFrom.current = null;
-                  }}
-                  onDropSlot={() => {
-                    const from = dragFrom.current;
-                    dragFrom.current = null;
-                    if (from !== null) swap(from, index);
-                  }}
-                />
-              ))}
-            </div>
-          </div>
-        </section>
-
-        {result ? (
-          <section className="rounded-lg border border-line bg-surface p-4" aria-label="Export result">
-            <div className="mb-3 flex flex-wrap items-end justify-between gap-3">
-              <div>
-                <h2 className="font-display text-xl font-semibold">Ready</h2>
-                <p className="mt-1 text-sm text-muted">
-                  {result.width}×{result.height} · {result.frames} frames · {result.fps} fps · {result.colors}{" "}
-                  colors
-                </p>
               </div>
-              <p className="font-display text-2xl font-semibold">
-                {formatMb(result.bytes)}
-                <span className="text-base font-medium text-muted"> / 14.9 MB</span>
-              </p>
-            </div>
-            <div className="mb-4 h-2 overflow-hidden rounded-full bg-canvas" aria-hidden>
-              <div
-                className="h-full bg-amber"
-                style={{ width: `${Math.min(100, (result.bytes / MAX_GIF_BYTES) * 100)}%` }}
-              />
-            </div>
-            <img
-              src={result.url}
-              alt="Exported GIF collage"
-              className="mx-auto max-h-[42dvh] w-auto max-w-full rounded-md bg-mat-black object-contain"
-            />
-            <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
-              <p className="text-sm text-muted">
-                Sources {formatMb(sourceBytes)} MB → collage {formatMb(result.bytes)} MB
-              </p>
-              <a
-                href={result.url}
-                download={`splice-${cols}x${rows}.gif`}
-                className="inline-flex min-h-11 items-center gap-2 rounded-lg bg-amber px-4 text-sm font-semibold text-amber-ink"
-              >
-                <Download className="size-4" aria-hidden />
-                Download GIF
-              </a>
             </div>
           </section>
-        ) : null}
 
-        {error ? (
-          <p role="alert" className="rounded-lg border border-line bg-surface px-3 py-2 text-sm text-amber">
-            {error}
-          </p>
-        ) : null}
-      </div>
+          {error ? (
+            <p role="alert" className="rounded-md border border-warn/40 bg-warn/10 px-4 py-3 text-sm text-ink">
+              {error}
+            </p>
+          ) : null}
 
-      <div className="fixed inset-x-0 bottom-0 border-t border-line bg-canvas/95 px-4 py-3 backdrop-blur-sm sm:px-6">
-        <div className="mx-auto flex w-full max-w-5xl flex-wrap items-center justify-between gap-3">
-          <div className="min-w-0 flex-1">
-            {busy && progress ? (
-              <>
-                <p className="truncate text-sm text-ink">{progress.label}</p>
-                <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-surface">
-                  <div
-                    className="h-full bg-amber transition-[width] duration-200"
-                    style={{ width: `${Math.round(progress.ratio * 100)}%` }}
-                  />
-                </div>
-              </>
-            ) : (
-              <p className="text-sm text-muted">
-                {filled === count
-                  ? result
-                    ? `${formatMb(result.bytes)} MB · highest resolution that still fits.`
-                    : "Every collage is built to 14.9 MB."
-                  : `Fill ${count - filled} more ${count - filled === 1 ? "cell" : "cells"} to export.`}
-              </p>
-            )}
-          </div>
-          <div className="flex flex-wrap items-center gap-2">
-            {result && !busy ? (
-              <a
-                href={result.url}
-                download={`splice-${cols}x${rows}.gif`}
-                className="inline-flex h-11 items-center gap-2 rounded-lg border border-line bg-surface px-4 text-sm font-semibold text-ink"
-              >
-                <Download className="size-4" aria-hidden />
-                Download
-              </a>
-            ) : null}
-            <button
-              type="button"
-              onClick={() => void onExport()}
-              disabled={!ready}
-              className="inline-flex min-h-11 items-center gap-2 rounded-lg bg-amber px-4 text-sm font-semibold text-amber-ink disabled:bg-surface-2 disabled:text-muted"
-            >
-              {busy ? <Loader2 className="size-4 animate-spin" aria-hidden /> : null}
-              {busy ? "Splicing" : "Export collage"}
-            </button>
-          </div>
+          {result ? (
+            <ResultCard
+              result={result}
+              downloadName={`splice-${cols}x${rows}.gif`}
+              note={`Made from ${formatMb(sourceBytes)} MB of source GIFs.`}
+            />
+          ) : null}
         </div>
+
+        <aside aria-label="Collage settings" className="lg:sticky lg:top-6">
+          {settings}
+        </aside>
       </div>
+
+      <ExportBar
+        busy={busy}
+        progress={progress}
+        hint={
+          filled === count
+            ? result
+              ? `${formatMb(result.bytes)} MB, ready to download.`
+              : "Ready. Export finds the sharpest GIF that fits under 15 MB."
+            : `Fill ${count - filled} more ${count - filled === 1 ? "cell" : "cells"} to export.`
+        }
+        ready={ready}
+        action="Export GIF"
+        downloadName={`splice-${cols}x${rows}.gif`}
+        result={result}
+        onRun={() => void onExport()}
+      />
     </>
   );
 }
 
-function Group({ label, className, children }: { label: string; className?: string; children: ReactNode }) {
+function Panel({ title, aside, children }: { title: string; aside?: string; children: ReactNode }) {
   return (
-    <div className={clsx("flex min-w-0 flex-col gap-1.5", className)}>
-      <span className="text-xs font-medium tracking-wide text-muted uppercase">{label}</span>
-      <div className="flex flex-wrap gap-1.5">{children}</div>
+    <section className="flex flex-col gap-3">
+      <div className="flex items-baseline justify-between">
+        <h2 className="text-sm font-semibold text-ink">{title}</h2>
+        {aside ? <span className="text-xs text-muted">{aside}</span> : null}
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function Row({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="grid grid-cols-[4.5rem_minmax(0,1fr)] items-center gap-3">
+      <span className="text-xs text-muted">{label}</span>
+      {children}
     </div>
+  );
+}
+
+function Pick({
+  active,
+  onClick,
+  label,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  label: string;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      aria-pressed={active}
+      aria-label={label}
+      onClick={onClick}
+      className={clsx(
+        "h-10 rounded-md border text-sm font-semibold transition-colors",
+        active ? "border-accent bg-accent text-accent-ink" : "border-line text-ink hover:border-line-strong",
+      )}
+    >
+      {children}
+    </button>
   );
 }
 
@@ -551,10 +523,10 @@ function Segment({
 }: {
   value: string;
   onChange: (value: string) => void;
-  options: Array<{ value: string; label: string; disabled?: boolean }>;
+  options: Array<{ value: string; label: string }>;
 }) {
   return (
-    <div className="flex min-w-0 flex-1 gap-1.5">
+    <div className="flex min-w-0 rounded-md border border-line bg-canvas p-0.5">
       {options.map((option) => {
         const active = value === option.value;
         return (
@@ -562,13 +534,10 @@ function Segment({
             key={option.value}
             type="button"
             aria-pressed={active}
-            disabled={option.disabled}
             onClick={() => onChange(option.value)}
             className={clsx(
-              "inline-flex h-11 flex-1 items-center justify-center rounded-lg border px-2 text-sm font-medium transition-colors disabled:opacity-40",
-              active
-                ? "border-amber bg-amber text-amber-ink"
-                : "border-line bg-canvas text-ink hover:bg-surface-2",
+              "h-9 min-w-0 flex-1 truncate rounded-[5px] px-2 text-sm font-medium transition-colors",
+              active ? "bg-surface-2 text-ink" : "text-muted hover:text-ink",
             )}
           >
             {option.label}
@@ -582,7 +551,7 @@ function Segment({
 function Glyph({ layout, active }: { layout: Layout; active: boolean }) {
   return (
     <span
-      className="grid h-6 w-6 shrink-0 gap-px"
+      className="grid h-7 w-9 shrink-0 gap-0.5"
       style={{
         gridTemplateColumns: `repeat(${layout.cols}, minmax(0, 1fr))`,
         gridTemplateRows: `repeat(${layout.rows}, minmax(0, 1fr))`,
@@ -592,7 +561,7 @@ function Glyph({ layout, active }: { layout: Layout; active: boolean }) {
       {layout.cells.map((cell, index) => (
         <span
           key={index}
-          className={active ? "bg-amber-ink" : "bg-current"}
+          className={clsx("rounded-[1px]", active ? "bg-accent" : "bg-current opacity-60")}
           style={{ gridColumn: `${cell.c + 1} / span ${cell.w}`, gridRow: `${cell.r + 1} / span ${cell.h}` }}
         />
       ))}
@@ -630,7 +599,7 @@ function Cell({
   const inputId = `cell-${index}`;
   return (
     <div
-      className={clsx("relative h-full min-h-0 min-w-0 overflow-hidden rounded-md", selected && "ring-2 ring-amber ring-inset")}
+      className={clsx("group relative h-full min-h-0 min-w-0 overflow-hidden", selected && "ring-2 ring-accent ring-inset")}
       style={span ? { gridColumn: `${span.c + 1} / span ${span.w}`, gridRow: `${span.r + 1} / span ${span.h}` } : undefined}
       onDragOver={(event) => event.preventDefault()}
       onDrop={(event) => {
@@ -666,10 +635,10 @@ function Cell({
       ) : (
         <label
           htmlFor={inputId}
-          className="absolute inset-0 flex cursor-pointer flex-col items-center justify-center gap-1 bg-surface text-muted hover:bg-surface-2 hover:text-ink"
+          className="absolute inset-0 flex cursor-pointer flex-col items-center justify-center gap-1 bg-surface-2 text-muted transition-colors hover:bg-surface-3 hover:text-ink"
         >
           <Plus className="size-5" aria-hidden />
-          <span className="text-xs font-medium">Add</span>
+          <span className="text-xs font-medium">{index + 1}</span>
           <input
             id={inputId}
             type="file"
@@ -687,7 +656,7 @@ function Cell({
         <button
           type="button"
           onClick={onClear}
-          className="absolute top-0.5 right-0.5 z-10 inline-flex size-11 items-center justify-center rounded-md bg-canvas/80 text-ink"
+          className="absolute top-2 right-2 z-10 inline-flex size-8 items-center justify-center rounded-md bg-canvas/85 text-ink transition-opacity hover:bg-canvas sm:opacity-0 sm:group-hover:opacity-100 sm:focus-visible:opacity-100"
           aria-label={`Remove ${slot.name}`}
         >
           <X className="size-4" aria-hidden />

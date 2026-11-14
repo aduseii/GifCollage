@@ -1,0 +1,2 @@
+- Built a standalone Instagram iOS-style viewer at artifacts/instagram-ios-viewer.html [2026-09-23]
+- App pastes public Instagram /p/, /reel/, /tv/, or profile URLs into an iPhone chrome and loads Instagram’s official embed plus a comments sheet. Full comment threads still require opening Instagram; no unofficial scraper was added. [2026-09-23]

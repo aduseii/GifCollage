@@ -1,0 +1,36 @@
+{
+  "url": "http://127.0.0.1:8080/",
+  "viewports": {
+    "desktop": {
+      "width": 1280,
+      "height": 800,
+      "status": 200,
+      "title": "Splice",
+      "hasCanvas": false,
+      "bodyTextLen": 277,
+      "bodyTextHash": "104ebebdd23417e866c26a306976a98636f0fee4d9cda20a33aa1eb277ba364a",
+      "bodyTextPrefix": "Splice GIF grids, filled out to 14.9 MB. 14.9 MB Collage Text Cr",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/app-builder-preview.png"
+    },
+    "mobile": {
+      "width": 390,
+      "height": 844,
+      "status": 200,
+      "title": "Splice",
+      "hasCanvas": false,
+      "bodyTextLen": 277,
+      "bodyTextHash": "104ebebdd23417e866c26a306976a98636f0fee4d9cda20a33aa1eb277ba364a",
+      "bodyTextPrefix": "Splice GIF grids, filled out to 14.9 MB. 14.9 MB Collage Text Cr",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/app-builder-preview-mobile.png"
+    }
+  },
+  "brandWarnings": [],
+  "authWarnings": [],
+  "verdictFile": "/workspace/screenshots/app-builder-preview.json"
+}

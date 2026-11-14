@@ -1,0 +1,90 @@
+@import "@fontsource/outfit/latin-400.css";
+@import "@fontsource/outfit/latin-500.css";
+@import "@fontsource/outfit/latin-600.css";
+@import "@fontsource/fraunces/latin-600.css";
+@import "@fontsource/fraunces/latin-700.css";
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Outfit", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Fraunces", ui-serif, Georgia, serif;
+  --color-canvas: #090b10;
+  --color-surface: #131820;
+  --color-surface-2: #1c2430;
+  --color-ink: #f4f0e6;
+  --color-muted: #9aa3b2;
+  --color-amber: #3dd6ff;
+  --color-amber-ink: #041018;
+  --color-line: color-mix(in srgb, var(--color-ink) 12%, transparent);
+  --color-mat-black: #000000;
+  --color-mat-paper: #efe6d6;
+  --radius-sm: 0.375rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+}
+
+@layer base {
+  html {
+    background: var(--color-canvas);
+    color: var(--color-ink);
+    overflow-x: clip;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    min-height: 100%;
+    background:
+      radial-gradient(980px 420px at 100% -8%, color-mix(in srgb, var(--color-amber) 16%, transparent), transparent 58%),
+      var(--color-canvas);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+
+  ::selection {
+    background: var(--color-amber);
+    color: var(--color-amber-ink);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+.board-fit {
+  position: relative;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: min(54dvh, 640px);
+  aspect-ratio: var(--board-aspect);
+  margin-inline: auto;
+}
+
+.board-fit > .board-grid {
+  position: absolute;
+  inset: 0;
+}
+
+@media (min-width: 640px) {
+  .board-fit {
+    max-height: min(64dvh, 760px);
+  }
+}
+
+.tool-scroll {
+  scrollbar-width: none;
+}
+
+.tool-scroll::-webkit-scrollbar {
+  display: none;
+}

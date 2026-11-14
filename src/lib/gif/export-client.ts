@@ -1,6 +1,4 @@
-import { MAX_GIF_BYTES } from "./limits";
-import { exactBytes } from "./exact-bytes";
-import { squeezeToCap } from "./squeeze";
+import { MAX_GIF_BYTES, TARGETS, type TargetId } from "./limits";
 
 export type ExportProgress = { ratio: number; label: string };
 
@@ -12,9 +10,14 @@ export type ExportResult = {
   frames: number;
   fps: number;
   colors: number;
+  /** 0–1: tiny frame-to-frame changes that were skipped to save space. */
+  smoothing: number;
+  /** Output size as a fraction of the largest size allowed. */
+  scale: number;
 };
 
 export type ExportJob = {
+  target: TargetId;
   files: File[];
   cols: number;
   rows: number;
@@ -27,6 +30,7 @@ export type ExportJob = {
 };
 
 export type SingleJob = {
+  target?: TargetId;
   op: "text" | "crop" | "compress";
   file: File;
   overlay?: ImageBitmap;
@@ -53,6 +57,7 @@ export function exportCollage(job: ExportJob): Promise<ExportResult> {
         gutterRatio: job.gutterRatio,
         cells: job.cells,
         maxBytes: MAX_GIF_BYTES,
+        target: TARGETS[job.target],
       },
       buffers,
     );
@@ -71,6 +76,7 @@ export function exportSingle(job: SingleJob): Promise<ExportResult> {
         buffer,
         mime: job.file.type,
         maxBytes: MAX_GIF_BYTES,
+        target: TARGETS[job.target ?? "x"],
         overlay: job.overlay,
         crop: job.crop,
       },
@@ -126,12 +132,8 @@ function runWorker(
       if (data.type === "done") {
         void (async () => {
           try {
-            let bytes = new Uint8Array(data.buffer);
-            if (bytes.byteLength > MAX_GIF_BYTES) {
-              bytes = await squeezeToCap(bytes, MAX_GIF_BYTES, onProgress);
-            }
-            if (bytes.byteLength < MAX_GIF_BYTES) bytes = exactBytes(bytes, MAX_GIF_BYTES);
-            if (bytes.byteLength > MAX_GIF_BYTES) throw new Error("Export came out over 14.9 MB.");
+            const bytes = new Uint8Array(data.buffer);
+            if (bytes.byteLength > MAX_GIF_BYTES) throw new Error("Export came out over the size limit.");
             const copy = new Uint8Array(bytes.byteLength);
             copy.set(bytes);
             finish();

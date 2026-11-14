@@ -186,7 +186,7 @@ export function TextTool() {
         },
       });
       if (jobRef.current !== job) return;
-      if (exported.bytes > MAX_GIF_BYTES) throw new Error("Export came out over 14.9 MB.");
+      if (exported.bytes > MAX_GIF_BYTES) throw new Error("Export came out over the size limit.");
       const blob = new Blob([exported.buffer], { type: "image/gif" });
       remember({
         url: URL.createObjectURL(blob),
@@ -196,6 +196,8 @@ export function TextTool() {
         frames: exported.frames,
         fps: exported.fps,
         colors: exported.colors,
+        smoothing: exported.smoothing,
+        scale: exported.scale,
       });
     } catch (cause) {
       if (jobRef.current !== job) return;
@@ -215,7 +217,7 @@ export function TextTool() {
 
   return (
     <>
-      <div className="flex flex-col gap-4 pb-40">
+      <div className="flex flex-col gap-4 pb-32">
         <section className="rounded-lg border border-line bg-surface p-3 sm:p-4" aria-label="Caption">
           <div className="flex flex-col gap-3">
             <label className="flex flex-col gap-1.5">
@@ -226,7 +228,7 @@ export function TextTool() {
                 maxLength={180}
                 placeholder="Type a caption, then drag it on the GIF"
                 onChange={(event) => onCaption(event.target.value)}
-                className="min-h-20 w-full resize-y rounded-lg border border-line bg-canvas px-3 py-2 text-base text-ink outline-none focus:border-amber"
+                className="min-h-20 w-full resize-y rounded-lg border border-line bg-canvas px-3 py-2 text-base text-ink outline-none focus:border-accent"
               />
             </label>
             <div className="rounded-lg border border-line bg-canvas">
@@ -235,7 +237,7 @@ export function TextTool() {
                 {typeof selected === "number" ? (
                   <button
                     type="button"
-                    className="text-sm font-medium text-amber"
+                    className="text-sm font-medium text-accent"
                     onClick={() => {
                       setStickers((list) => list.filter((item) => item.id !== selected));
                       setSelected(null);
@@ -318,8 +320,8 @@ export function TextTool() {
 
         <section aria-label="Text preview">
           <div className="mb-2 flex items-baseline justify-between gap-3">
-            <h2 className="font-display text-xl font-semibold">Preview</h2>
-            <label className="inline-flex h-11 cursor-pointer items-center rounded-lg border border-line bg-surface px-3 text-sm font-medium text-ink hover:bg-surface-2">
+            <h2 className="text-sm font-semibold text-ink">Preview</h2>
+            <label className="inline-flex h-10 cursor-pointer items-center rounded-md border border-line-strong px-4 text-sm font-medium text-ink transition-colors hover:bg-surface-2">
               {file ? "Replace GIF" : "Add GIF"}
               <input
                 id="text-gif"
@@ -352,7 +354,7 @@ export function TextTool() {
                     "absolute z-10 max-w-[88%] -translate-x-1/2 -translate-y-1/2 cursor-grab touch-none text-center leading-tight select-none active:cursor-grabbing",
                     plate === "dark" && "rounded-md bg-canvas/80 px-[0.6em] py-[0.3em]",
                     plate === "light" && "rounded-md bg-mat-paper px-[0.6em] py-[0.3em]",
-                    selected === "text" && "ring-2 ring-amber",
+                    selected === "text" && "ring-2 ring-accent",
                   )}
                   style={{
                     left: `${pos.x * 100}%`,
@@ -383,7 +385,7 @@ export function TextTool() {
                   aria-label={`Drag emoji ${sticker.glyph}`}
                   className={clsx(
                     "absolute z-20 -translate-x-1/2 -translate-y-1/2 cursor-grab touch-none select-none active:cursor-grabbing",
-                    selected === sticker.id && "z-30 rounded-md ring-2 ring-amber",
+                    selected === sticker.id && "z-30 rounded-md ring-2 ring-accent",
                   )}
                   style={{ left: `${sticker.x * 100}%`, top: `${sticker.y * 100}%`, width: `${sticker.scale * 100}cqi` }}
                   onPointerDown={(event) => {
@@ -444,11 +446,11 @@ export function TextTool() {
             result={result}
             before={file?.size}
             downloadName="splice-caption.gif"
-            note="Burned in with the same 14.9 MB collage export."
+            note=""
           />
         ) : null}
         {error ? (
-          <p role="alert" className="rounded-lg border border-line bg-surface px-3 py-2 text-sm text-amber">
+          <p role="alert" className="rounded-md border border-warn/40 bg-warn/10 px-4 py-3 text-sm text-ink">
             {error}
           </p>
         ) : null}

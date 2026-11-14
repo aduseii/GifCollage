@@ -28,7 +28,7 @@ export function CompressTool() {
     const job = ++jobRef.current;
     setBusy(true);
     setError(null);
-    setProgress({ ratio: 0.04, label: "Locking 14.9 MB" });
+    setProgress({ ratio: 0.04, label: "Checking size" });
     try {
       const exported = await exportSingle({
         op: "compress",
@@ -38,7 +38,7 @@ export function CompressTool() {
         },
       });
       if (jobRef.current !== job) return;
-      if (exported.bytes > MAX_GIF_BYTES) throw new Error("Export came out over 14.9 MB.");
+      if (exported.bytes > MAX_GIF_BYTES) throw new Error("Export came out over the size limit.");
       const type = exported.frames === 0 ? file.type || "image/gif" : "image/gif";
       const blob = new Blob([exported.buffer], { type });
       remember({
@@ -49,6 +49,8 @@ export function CompressTool() {
         frames: exported.frames,
         fps: exported.fps,
         colors: exported.colors,
+        smoothing: exported.smoothing,
+        scale: exported.scale,
       });
     } catch (cause) {
       if (jobRef.current !== job) return;
@@ -64,25 +66,26 @@ export function CompressTool() {
 
   return (
     <>
-      <div className="flex flex-col gap-4 pb-40">
+      <div className="flex flex-col gap-4 pb-32">
         <section className="rounded-lg border border-line bg-surface p-4">
-          <h2 className="font-display text-xl font-semibold">Same size, smaller file</h2>
-          <p className="mt-2 max-w-2xl text-sm text-muted">
-            The picture is not resized. A GIF over 14.9 MB is optimized the way EZGIF does it: frame optimize, then
-            lossy compression, then fewer colors only if it still will not fit. The export still locks at 14.9 MB.
+          <h2 className="text-sm font-semibold text-ink">Same picture size, smaller file</h2>
+          <p className="mt-2 max-w-2xl text-sm leading-6 text-muted">
+            A GIF over 15 MB is rebuilt at the same width and height: unchanged pixels are dropped from each frame
+            first, and stronger compression is used only if it still does not fit. A GIF already under the limit is
+            left untouched.
           </p>
           {file ? (
             <p className="mt-3 text-sm text-ink">
-              {file.name} · <span className={over ? "text-amber" : "text-ink"}>{formatMb(file.size)} MB</span>
-              {over ? " · starts over 14.9 MB" : " · starts under 14.9 MB"}
+              {file.name} · <span className={over ? "text-accent" : "text-ink"}>{formatMb(file.size)} MB</span>
+              {over ? " · over the limit" : " · already under the limit"}
             </p>
           ) : null}
         </section>
 
         <section aria-label="Compress preview">
           <div className="mb-2 flex items-baseline justify-between gap-3">
-            <h2 className="font-display text-xl font-semibold">GIF</h2>
-            <label className="inline-flex h-11 cursor-pointer items-center rounded-lg border border-line bg-surface px-3 text-sm font-medium text-ink hover:bg-surface-2">
+            <h2 className="text-sm font-semibold text-ink">GIF</h2>
+            <label className="inline-flex h-10 cursor-pointer items-center rounded-md border border-line-strong px-4 text-sm font-medium text-ink transition-colors hover:bg-surface-2">
               {file ? "Replace GIF" : "Add GIF"}
               <input
                 id="compress-gif"
@@ -100,7 +103,7 @@ export function CompressTool() {
             <img src={url} alt="" className="mx-auto max-h-[48dvh] w-auto max-w-full rounded-lg bg-mat-black object-contain" />
           ) : (
             <label className="flex min-h-48 cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-line bg-surface text-muted hover:text-ink">
-              Drop a GIF to lock at 14.9 MB
+              Choose a GIF to compress
               <input
                 id="compress-drop"
                 type="file"
@@ -119,12 +122,12 @@ export function CompressTool() {
           <ResultCard
             result={result}
             before={file?.size}
-            downloadName="splice-149.gif"
-            note="Locked at 14.9 MB. Nothing from this app exports smaller."
+            downloadName="splice-compressed.gif"
+            note=""
           />
         ) : null}
         {error ? (
-          <p role="alert" className="rounded-lg border border-line bg-surface px-3 py-2 text-sm text-amber">
+          <p role="alert" className="rounded-md border border-warn/40 bg-warn/10 px-4 py-3 text-sm text-ink">
             {error}
           </p>
         ) : null}
@@ -132,10 +135,10 @@ export function CompressTool() {
       <ExportBar
         busy={busy}
         progress={progress}
-        hint={file ? "Keeps the pixel size. Lossy-optimizes only if the file is over 14.9 MB." : "Add a GIF. The picture will not be resized."}
+        hint={file ? "Keeps the width and height. Compresses only if the file is over 15 MB." : "Add a GIF. It will not be resized."}
         ready={!!file && !busy}
-        action="Lock 14.9"
-        downloadName="splice-149.gif"
+        action="Compress"
+        downloadName="splice-compressed.gif"
         result={result}
         onRun={() => void onExport()}
       />

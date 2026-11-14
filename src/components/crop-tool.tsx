@@ -96,7 +96,7 @@ export function CropTool() {
         },
       });
       if (jobRef.current !== job) return;
-      if (exported.bytes > MAX_GIF_BYTES) throw new Error("Export came out over 14.9 MB.");
+      if (exported.bytes > MAX_GIF_BYTES) throw new Error("Export came out over the size limit.");
       const blob = new Blob([exported.buffer], { type: "image/gif" });
       remember({
         url: URL.createObjectURL(blob),
@@ -106,6 +106,8 @@ export function CropTool() {
         frames: exported.frames,
         fps: exported.fps,
         colors: exported.colors,
+        smoothing: exported.smoothing,
+        scale: exported.scale,
       });
     } catch (cause) {
       if (jobRef.current !== job) return;
@@ -121,7 +123,7 @@ export function CropTool() {
 
   return (
     <>
-      <div className="flex flex-col gap-4 pb-40">
+      <div className="flex flex-col gap-4 pb-32">
         <section className="rounded-lg border border-line bg-surface p-3 sm:p-4">
           <Choice label="Crop shape">
             {RATIOS.map((item) => (
@@ -134,8 +136,8 @@ export function CropTool() {
 
         <section aria-label="Crop preview">
           <div className="mb-2 flex items-baseline justify-between gap-3">
-            <h2 className="font-display text-xl font-semibold">Frame</h2>
-            <label className="inline-flex h-11 cursor-pointer items-center rounded-lg border border-line bg-surface px-3 text-sm font-medium text-ink hover:bg-surface-2">
+            <h2 className="text-sm font-semibold text-ink">Frame</h2>
+            <label className="inline-flex h-10 cursor-pointer items-center rounded-md border border-line-strong px-4 text-sm font-medium text-ink transition-colors hover:bg-surface-2">
               {file ? "Replace GIF" : "Add GIF"}
               <input
                 id="crop-gif"
@@ -168,7 +170,7 @@ export function CropTool() {
                 <div className="absolute right-0 bg-canvas/70" style={{ top: `${crop.y * 100}%`, height: `${crop.h * 100}%`, width: `${(1 - crop.x - crop.w) * 100}%` }} />
               </div>
               <div
-                className="absolute cursor-move border-2 border-amber"
+                className="absolute cursor-move border-2 border-accent"
                 style={{ left: `${crop.x * 100}%`, top: `${crop.y * 100}%`, width: `${crop.w * 100}%`, height: `${crop.h * 100}%` }}
                 onPointerDown={(event) => beginDrag(event, "move")}
               >
@@ -203,10 +205,10 @@ export function CropTool() {
         </section>
 
         {result ? (
-          <ResultCard result={result} before={file?.size} downloadName="splice-crop.gif" note="Cropped with the collage export and filled to 14.9 MB." />
+          <ResultCard result={result} before={file?.size} downloadName="splice-crop.gif" note="" />
         ) : null}
         {error ? (
-          <p role="alert" className="rounded-lg border border-line bg-surface px-3 py-2 text-sm text-amber">
+          <p role="alert" className="rounded-md border border-warn/40 bg-warn/10 px-4 py-3 text-sm text-ink">
             {error}
           </p>
         ) : null}
@@ -245,7 +247,7 @@ function HandleCorner({
       onPointerDown={onPointerDown}
       className={`absolute z-10 flex size-11 items-center justify-center ${pos}`}
     >
-      <span className="size-3.5 rounded-sm border-2 border-amber-ink bg-amber" />
+      <span className="size-3.5 rounded-sm border-2 border-accent-ink bg-accent" />
     </button>
   );
 }

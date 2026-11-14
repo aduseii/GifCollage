@@ -1,6 +1,5 @@
-# Rebuilds the public site whenever main changes, and publishes it to the
-# gh-pages branch. Enable it once under Settings > Pages by choosing
-# "Deploy from a branch" > gh-pages > / (root).
+# Builds the site and publishes it to GitHub Pages on every change to main.
+# The first run also switches Pages on, so there is nothing to set up by hand.
 name: Build site
 
 on:
@@ -9,11 +8,13 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+  pages: write
+  id-token: write
 
 concurrency:
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -26,14 +27,24 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build:static
-      - name: Make it servable from a subfolder
+      - name: Serve it from a subfolder
         run: |
-          cp dist-static/static.html dist-static/index.html
-          cp dist-static/static.html dist-static/404.html
-          rm dist-static/static.html
+          mv dist-static/static.html dist-static/index.html
+          cp dist-static/index.html dist-static/404.html
           touch dist-static/.nojekyll
-      - uses: peaceiris/actions-gh-pages@v4
+      - uses: actions/configure-pages@v5
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./dist-static
-          publish_branch: gh-pages
+          enablement: true
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./dist-static
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
